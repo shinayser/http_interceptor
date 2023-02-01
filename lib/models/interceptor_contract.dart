@@ -1,5 +1,7 @@
 import 'package:http/http.dart';
 
+import 'interceptor_switch.dart';
+
 ///Interceptor interface to create custom Interceptor for http.
 ///Extend this class and override the functions that you want
 ///to intercept.

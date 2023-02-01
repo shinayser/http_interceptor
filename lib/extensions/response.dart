@@ -2,6 +2,9 @@ import 'package:http/http.dart';
 
 /// Extends [Response] to provide copied instances.
 extension ResponseCopyWith on Response {
+
+  String? get contentType => headers['content-type'];
+
   /// Creates a new instance of [Response] based of on `this`. It copies
   /// all the properties and overrides the ones sent via parameters.
   Response copyWith({

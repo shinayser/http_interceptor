@@ -5,6 +5,9 @@ import 'dart:typed_data';
 import 'package:http/http.dart';
 import 'package:http_interceptor/extensions/base_request.dart';
 import 'package:http_interceptor/extensions/uri.dart';
+import 'package:http_interceptor/models/interceptor_switch.dart';
+import 'package:http_interceptor/models/pauseable_interceptor.dart';
+import 'package:pool/pool.dart';
 
 import '../models/interceptor_contract.dart';
 import '../models/retry_policy.dart';
@@ -55,7 +58,12 @@ class InterceptedClient extends BaseClient {
   final RetryPolicy? retryPolicy;
 
   int _retryCount = 0;
-  late Client _inner;
+  late Client _client;
+
+  late HttpClientSwitch _clientSwitch;
+  late Pool _pool;
+
+  Completer? _semaphore;
 
   InterceptedClient._internal({
     required this.interceptors,
@@ -63,7 +71,11 @@ class InterceptedClient extends BaseClient {
     this.onRequestTimeout,
     this.retryPolicy,
     Client? client,
-  }) : _inner = client ?? Client();
+  }) {
+    _client = client ?? Client();
+    _clientSwitch = HttpClientSwitch(resumeRequests, pauseRequests);
+    _pool = Pool(1);
+  }
 
   /// Builds a new [InterceptedClient] instance.
   ///
@@ -272,11 +284,20 @@ class InterceptedClient extends BaseClient {
       // Intercept request
       final interceptedRequest = await _interceptRequest(request);
 
+      try {
+        await _semaphore?.future;
+      } catch (e) {
+        throw ClientException('Request cancelled', interceptedRequest.url);
+      }
+
+      await Future.delayed(const Duration(milliseconds: 1000));
+
       var stream = requestTimeout == null
-          ? await _inner.send(interceptedRequest)
-          : await _inner
-              .send(interceptedRequest)
-              .timeout(requestTimeout!, onTimeout: onRequestTimeout);
+          ? await _client.send(interceptedRequest)
+          : await _client.send(interceptedRequest).timeout(
+                requestTimeout!,
+                onTimeout: onRequestTimeout,
+              );
 
       response =
           request is Request ? await Response.fromStream(stream) : stream;
@@ -294,6 +315,7 @@ class InterceptedClient extends BaseClient {
         _retryCount += 1;
         return _attemptRequest(request);
       } else {
+        _retryCount = 0;
         rethrow;
       }
     }
@@ -304,34 +326,53 @@ class InterceptedClient extends BaseClient {
 
   /// This internal function intercepts the request.
   Future<BaseRequest> _interceptRequest(BaseRequest request) async {
-    BaseRequest interceptedRequest = request.copyWith();
-    for (InterceptorContract interceptor in interceptors) {
-      if (await interceptor.shouldInterceptRequest()) {
-        interceptedRequest = await interceptor.interceptRequest(
-          request: interceptedRequest,
-        );
-      }
-    }
+    return _pool.withResource(() async {
+      BaseRequest interceptedRequest = request.copyWith();
+      for (InterceptorContract interceptor in interceptors) {
+        if (await interceptor.shouldInterceptRequest()) {
+          if (interceptor is PauseableInterceptorContract) {
+            interceptor.requestsSwitch = _clientSwitch;
+          }
 
-    return interceptedRequest;
+          interceptedRequest = await interceptor.interceptRequest(
+            request: interceptedRequest,
+          );
+        }
+      }
+
+      return interceptedRequest;
+    });
   }
 
   /// This internal function intercepts the response.
   Future<BaseResponse> _interceptResponse(BaseResponse response) async {
-    BaseResponse interceptedResponse = response;
-    for (InterceptorContract interceptor in interceptors) {
-      if (await interceptor.shouldInterceptResponse()) {
-        interceptedResponse = await interceptor.interceptResponse(
-          response: interceptedResponse,
-        );
+    return _pool.withResource(() async {
+      BaseResponse interceptedResponse = response;
+      for (InterceptorContract interceptor in interceptors) {
+        if (await interceptor.shouldInterceptResponse()) {
+          interceptedResponse = await interceptor.interceptResponse(
+            response: interceptedResponse,
+          );
+        }
       }
-    }
 
-    return interceptedResponse;
+      return interceptedResponse;
+    });
   }
 
   @override
   void close() {
-    _inner.close();
+    _client.close();
+  }
+
+  void pauseRequests() {
+    _semaphore = Completer();
+  }
+
+  void resumeRequests() {
+    if (_semaphore != null) {
+      _semaphore!.complete();
+      _semaphore = null;
+    }
   }
 }

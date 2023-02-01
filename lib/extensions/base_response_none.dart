@@ -5,6 +5,8 @@ import './streamed_response.dart';
 
 // Extends [BaseRequest] to provide copied instances.
 extension BaseResponseCopyWith on BaseResponse {
+  String? get contentType => headers['content-type'];
+
   /// Creates a new instance of [BaseResponse] based of on `this`. It copies
   /// all the properties and overrides the ones sent via parameters.
   ///
